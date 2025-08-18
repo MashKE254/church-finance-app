@@ -1428,18 +1428,21 @@ function GivingHistoryPage() {
 
     useEffect(() => {
         if (!user) return;
+        
         // CORRECTED: Added orderBy to let Firestore sort the data efficiently
         const q = query(
             collection(db, `artifacts/${appId}/public/data/donations`), 
             where("userId", "==", user.uid),
             orderBy("date", "desc") // Let Firestore do the sorting
         );
+        
         const unsubscribe = onSnapshot(q, (querySnapshot) => {
             const userDonations = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             // REMOVED: No need to sort on the client anymore
             setDonations(userDonations);
             setLoading(false);
         });
+
         return () => unsubscribe();
     }, [db, user, appId]);
 
@@ -1451,8 +1454,14 @@ function GivingHistoryPage() {
                     {loading ? <li className="p-4 text-center">Loading your history...</li> : donations.length === 0 ? <li className="p-4 text-center">You haven't made any donations yet.</li> :
                         donations.map(d => (
                             <li key={d.id} className="p-4 flex justify-between items-center">
-                                <div><p className="font-bold text-lg">Ksh {d.amount.toLocaleString()}</p><p className="text-sm text-gray-500">{d.fund}</p></div>
-                                <div className="text-right"><p className="font-semibold">{d.date ? d.date.toDate().toLocaleDateString() : 'N/A'}</p><p className="text-sm text-gray-500">{d.paymentMethod}</p></div>
+                                <div>
+                                    <p className="font-bold text-lg">Ksh {d.amount.toLocaleString()}</p>
+                                    <p className="text-sm text-gray-500">{d.fund}</p>
+                                </div>
+                                <div className="text-right">
+                                    <p className="font-semibold">{d.date ? d.date.toDate().toLocaleDateString() : 'N/A'}</p>
+                                    <p className="text-sm text-gray-500">{d.paymentMethod}</p>
+                                </div>
                             </li>
                         ))}
                 </ul>
