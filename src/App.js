@@ -24,11 +24,12 @@ import {
     setLogLevel,
     getDocs,
     writeBatch,
-    orderBy
+    orderBy,
+    limit
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { AreaChart, Area, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { User, DollarSign, Users, BarChart2, Settings, LogOut, HandHeart, FileText, PlusCircle, Trash2, Edit, X, CheckCircle, AlertTriangle, Home, Eye, Menu, Target, PiggyBank, Receipt, MessageSquare, Repeat, Calendar, Package, Upload, Link as LinkIcon, Users2, Bell, TrendingUp, Briefcase, Landmark, FileCheck2, Search, CreditCard, Smartphone, BookCopy, FileInput, FileOutput, History, UserCheck, Sun, Moon, ExternalLink, ArrowLeft } from 'lucide-react';
+import { User, DollarSign, Users, BarChart2, Settings, LogOut, HandHeart, FileText, PlusCircle, Trash2, Edit, X, CheckCircle, AlertTriangle, Home, Eye, Menu, Target, PiggyBank, Receipt, MessageSquare, Repeat, Calendar, Package, Upload, Link as LinkIcon, Users2, Bell, TrendingUp, Briefcase, Landmark, FileCheck2, Search, CreditCard, Smartphone, BookCopy, FileInput, FileOutput, History, UserCheck, Sun, Moon, ExternalLink, ArrowLeft, Send } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 // --- Firebase Configuration ---
@@ -111,32 +112,48 @@ export default function App() {
     // --- END THEME STATE MANAGEMENT ---
 
     useEffect(() => {
-        const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+        let unsubscribeDoc = () => {}; // Initialize an empty unsubscribe function for the document listener
+
+        const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+            unsubscribeDoc(); // Unsubscribe from any previous document listener
+
             if (firebaseUser && !firebaseUser.isAnonymous) {
                 const userDocRef = doc(db, "users", firebaseUser.uid);
-                const userDocSnap = await getDoc(userDocRef);
 
-                if (userDocSnap.exists()) {
-                    const data = userDocSnap.data();
-                    setUserData({ uid: firebaseUser.uid, ...data });
-                    if (!data.onboardingCompleted) {
-                        setShowOnboarding(true);
+                // Set up the real-time listener for the user's document
+                unsubscribeDoc = onSnapshot(userDocRef, (userDocSnap) => {
+                    if (userDocSnap.exists()) {
+                        const data = userDocSnap.data();
+                        setUserData({ uid: firebaseUser.uid, ...data });
+                        if (!data.onboardingCompleted) {
+                            setShowOnboarding(true);
+                        }
                     }
-                } else {
-                    const newUser = { uid: firebaseUser.uid, email: firebaseUser.email, role: 'member', name: firebaseUser.displayName || 'New Member', createdAt: Timestamp.now(), onboardingCompleted: false };
+                });
+
+                // Check if the user document exists on initial load, create if not
+                const initialDoc = await getDoc(userDocRef);
+                if (!initialDoc.exists()) {
+                    const newUser = { uid: firebaseUser.uid, email: firebaseUser.email, role: 'member', name: firebaseUser.displayName || 'New Member', createdAt: Timestamp.now(), onboardingCompleted: false, groupId: null, groupName: null, joinRequest: null };
                     await setDoc(userDocRef, newUser);
-                    setUserData(newUser);
+                    // The onSnapshot listener above will automatically set the user data
                     setShowOnboarding(true);
                 }
                 setUser(firebaseUser);
             } else {
+                // User is signed out
                 setUser(null);
                 setUserData(null);
             }
             setLoading(false);
         });
-        return () => unsubscribe();
-    }, []);
+
+        // Cleanup function to be called when the App component unmounts
+        return () => {
+            unsubscribeAuth();
+            unsubscribeDoc();
+        };
+    }, []); // The empty dependency array ensures this runs only once on mount
 
     const handleLogout = async () => {
         try {
@@ -164,7 +181,7 @@ export default function App() {
     }
 
     return (
-        <AppContext.Provider value={{ user, userData, db, appId, storage, logAuditEvent, createLedgerEntries, theme, toggleTheme }}>
+        <AppContext.Provider value={{ user, userData, db, appId, storage, logAuditEvent, createLedgerEntries, theme, toggleTheme, setCurrentPage }}>
             <DashboardLayout
                 currentPage={currentPage}
                 setCurrentPage={setCurrentPage}
@@ -287,7 +304,16 @@ function SignUpForm({ onAuthSuccess }) {
         setLoading(true);
         try {
             const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-            await setDoc(doc(db, "users", userCredential.user.uid), { name, email, role: 'member', createdAt: Timestamp.now(), onboardingCompleted: false });
+            await setDoc(doc(db, "users", userCredential.user.uid), { 
+                name, 
+                email, 
+                role: 'member', 
+                createdAt: Timestamp.now(), 
+                onboardingCompleted: false,
+                groupId: null,
+                groupName: null,
+                joinRequest: null
+            });
             onAuthSuccess();
         } catch (err) {
             setError(getFriendlyAuthErrorMessage(err));
@@ -927,7 +953,7 @@ function ManageDonations() {
 function DonationForm({ onSubmit, onCancel, donation }) {
     const { db } = useContext(AppContext);
     const [members, setMembers] = useState([]);
-    const [formData, setFormData] = useState({ memberId: '', memberName: '', amount: '', fund: 'Tithes & Offering', date: new Date().toISOString().split('T')[0], type: 'Offline' });
+    const [formData, setFormData] = useState({ userId: '', memberName: '', amount: '', fund: 'Tithes & Offering', date: new Date().toISOString().split('T')[0], type: 'Offline' });
     
     useEffect(() => {
         const fetchMembers = async () => {
@@ -1331,7 +1357,7 @@ function BudgetForm({ onSubmit, onCancel, budget }) {
 
 
 function MemberManagement() {
-    const { db, userData, logAuditEvent } = useContext(AppContext);
+    const { db, appId, userData, logAuditEvent } = useContext(AppContext);
     const [members, setMembers] = useState([]);
     const [groups, setGroups] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -1358,6 +1384,10 @@ function MemberManagement() {
         if (field === 'groupId') {
             const selectedGroup = groups.find(g => g.id === value);
             updateData.groupName = selectedGroup ? selectedGroup.name : null;
+            // If changing a group, ensure any pending request is cleared.
+            if (member.joinRequest) {
+                updateData.joinRequest = null;
+            }
         }
 
         await updateDoc(userDocRef, updateData);
@@ -1625,64 +1655,135 @@ function LeadershipDashboard() {
 
 // --- Member Components ---
 function MemberDashboard() {
-    const { db, user, userData, appId } = useContext(AppContext);
+    const { db, user, userData, appId, setCurrentPage } = useContext(AppContext);
     const [stats, setStats] = useState({ totalGiving: 0, lastDonation: 0 });
+    const [recentActivity, setRecentActivity] = useState([]);
+    const [upcomingEvents, setUpcomingEvents] = useState([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         if (!user) return;
-        const fetchStats = async () => {
+
+        const fetchData = async () => {
             setLoading(true);
+            
+            // --- Fetch Giving Stats & Recent Activity ---
             const today = new Date();
             const startOfYear = new Date(today.getFullYear(), 0, 1);
 
             const donationsQuery = query(
                 collection(db, `artifacts/${appId}/public/data/donations`),
                 where("userId", "==", user.uid),
-                where("date", ">=", startOfYear)
+                orderBy("date", "desc")
             );
-
+            
             const querySnapshot = await getDocs(donationsQuery);
             let totalGiving = 0;
-            let lastDonationAmount = 0;
-            let lastDonationDate = new Date(0);
-
+            const activities = [];
+            
             querySnapshot.forEach(doc => {
                 const data = doc.data();
-                totalGiving += data.amount;
-                if (data.date.toDate() > lastDonationDate) {
-                    lastDonationDate = data.date.toDate();
-                    lastDonationAmount = data.amount;
+                if (data.date.toDate() >= startOfYear) {
+                    totalGiving += data.amount;
+                }
+                if (activities.length < 5) {
+                    activities.push({
+                        id: doc.id,
+                        type: 'Donation',
+                        description: `Gave to ${data.fund}`,
+                        amount: data.amount,
+                        date: data.date.toDate()
+                    });
                 }
             });
 
-            setStats({ totalGiving, lastDonation: lastDonationAmount });
+            setStats({ totalGiving, lastDonation: activities.length > 0 ? activities[0].amount : 0 });
+            setRecentActivity(activities);
+
+            // --- Fetch Upcoming Events ---
+            const eventsQuery = query(
+                collection(db, `artifacts/${appId}/public/data/events`),
+                where("date", ">=", Timestamp.now()),
+                orderBy("date", "asc"),
+                limit(2)
+            );
+            const eventsSnapshot = await getDocs(eventsQuery);
+            setUpcomingEvents(eventsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+            
             setLoading(false);
         };
-        fetchStats();
+        fetchData();
     }, [db, user, appId]);
 
-    if (loading) return <LoadingScreen message="Loading your dashboard..."/>;
+    if (loading) return <LoadingScreen message="Loading your dashboard..." />;
 
     const summaryData = [
         { name: 'Total Giving This Year', value: `Ksh ${stats.totalGiving.toLocaleString()}`, icon: DollarSign, color: 'text-green-600 dark:text-green-400' },
         { name: 'Last Donation', value: `Ksh ${stats.lastDonation.toLocaleString()}`, icon: HandHeart, color: 'text-primary' }
     ];
 
+    const shortcuts = [
+        { name: 'Give Now', icon: HandHeart, page: 'give', color: 'bg-primary hover:bg-indigo-500' },
+        { name: 'Giving History', icon: FileText, page: 'history', color: 'bg-green-600 hover:bg-green-500' },
+        { name: 'My Pledges', icon: Repeat, page: 'pledges', color: 'bg-secondary hover:bg-purple-500' },
+        { name: 'Upcoming Events', icon: Calendar, page: 'events', color: 'bg-accent-cyan hover:bg-cyan-500' },
+    ];
+
     return (
         <div>
             <h2 className="text-3xl font-bold mb-2 text-slate-900 dark:text-slate-100">Welcome, {userData.name}!</h2>
-            <p className="text-slate-500 dark:text-slate-400 mb-6">Here's a summary of your giving journey.</p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
-                {summaryData.map(item => (
-                    <motion.div key={item.name} whileHover={{ y: -5 }} className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg flex items-center space-x-4">
-                        <div className={`p-3 rounded-full bg-slate-100 dark:bg-slate-800 ${item.color}`}><item.icon className="h-6 w-6" /></div>
-                        <div>
-                            <p className="text-sm text-slate-500 dark:text-slate-400">{item.name}</p>
-                            <p className="text-2xl font-bold text-slate-900 dark:text-slate-100">{item.value}</p>
-                        </div>
-                    </motion.div>
-                ))}
+            <p className="text-slate-500 dark:text-slate-400 mb-6">Here's a summary of your giving journey and church activities.</p>
+            
+            {/* --- Quick Actions --- */}
+            <div className="mb-8">
+                <h3 className="text-xl font-bold mb-4 text-slate-800 dark:text-slate-200">Quick Actions</h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {shortcuts.map(item => (
+                        <motion.button 
+                            key={item.name} 
+                            onClick={() => setCurrentPage(item.page)}
+                            whileHover={{ y: -5, scale: 1.05 }}
+                            className={`p-4 rounded-xl shadow-lg text-white font-bold flex flex-col items-center justify-center text-center ${item.color} transition-transform`}
+                        >
+                            <item.icon className="h-8 w-8 mb-2" />
+                            <span>{item.name}</span>
+                        </motion.button>
+                    ))}
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* --- Recent Activity --- */}
+                <div className="lg:col-span-2 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg">
+                    <h3 className="text-xl font-bold mb-4 text-slate-800 dark:text-slate-200">Recent Activity</h3>
+                    <ul className="divide-y divide-slate-200 dark:divide-slate-800">
+                        {recentActivity.length > 0 ? recentActivity.map(activity => (
+                             <li key={activity.id} className="py-3 flex justify-between items-center">
+                                <div>
+                                    <p className="font-semibold text-slate-800 dark:text-slate-200">{activity.type}</p>
+                                    <p className="text-sm text-slate-500 dark:text-slate-400">{activity.description}</p>
+                                </div>
+                                <div className="text-right">
+                                    <p className="font-bold text-lg text-green-600 dark:text-green-400">Ksh {activity.amount.toLocaleString()}</p>
+                                    <p className="text-xs text-slate-500 dark:text-slate-500">{activity.date.toLocaleDateString()}</p>
+                                </div>
+                            </li>
+                        )) : <p className="text-slate-500 dark:text-slate-400 text-center py-4">No recent transactions found.</p>}
+                    </ul>
+                </div>
+
+                {/* --- Upcoming Events --- */}
+                <div className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg">
+                     <h3 className="text-xl font-bold mb-4 text-slate-800 dark:text-slate-200">Upcoming Events</h3>
+                     <div className="space-y-4">
+                        {upcomingEvents.length > 0 ? upcomingEvents.map(event => (
+                            <div key={event.id} className="p-4 bg-slate-100 dark:bg-slate-800/50 rounded-lg">
+                                <p className="font-bold text-slate-900 dark:text-slate-100">{event.name}</p>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">{event.date.toDate().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                            </div>
+                        )) : <p className="text-slate-500 dark:text-slate-400 text-center py-4">No upcoming events scheduled.</p>}
+                     </div>
+                </div>
             </div>
         </div>
     );
@@ -1729,14 +1830,39 @@ function GiveNowPage({ setCurrentPage }) {
 }
 
 function GiveForm({ onSubmit }) {
+    const { db, user, appId } = useContext(AppContext);
+    const [pledges, setPledges] = useState([]);
+    const [selectedPledgeId, setSelectedPledgeId] = useState('');
     const [amount, setAmount] = useState('');
     const [fund, setFund] = useState('Tithes & Offering');
     const [paymentMethod, setPaymentMethod] = useState('M-Pesa');
     const [givingType, setGivingType] = useState('one-time');
 
+    useEffect(() => {
+        if (!user) return;
+        const q = query(collection(db, `artifacts/${appId}/public/data/pledges`), where("userId", "==", user.uid));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const userPledges = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+                .filter(p => p.totalGiven < p.totalPledged);
+            setPledges(userPledges);
+        });
+        return () => unsubscribe();
+    }, [db, user, appId]);
+
+    const handlePledgeChange = (e) => {
+        const pledgeId = e.target.value;
+        setSelectedPledgeId(pledgeId);
+        if (pledgeId) {
+            const selected = pledges.find(p => p.id === pledgeId);
+            if (selected) {
+                setFund(selected.fund);
+            }
+        }
+    };
+
     const handleSubmit = (e) => {
         e.preventDefault();
-        onSubmit({ amount, fund, paymentMethod, givingType });
+        onSubmit({ amount, fund, paymentMethod, givingType, selectedPledgeId });
     };
 
     return (
@@ -1746,13 +1872,26 @@ function GiveForm({ onSubmit }) {
                 <button onClick={() => setGivingType('recurring')} className={`w-1/2 py-2 rounded-md transition-colors ${givingType === 'recurring' ? 'bg-primary text-white' : 'text-slate-500 dark:text-slate-400'}`}>Recurring</button>
             </div>
             <form onSubmit={handleSubmit} className="space-y-6">
+                 {pledges.length > 0 && (
+                     <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Contribute to a Pledge (Optional)</label>
+                        <select value={selectedPledgeId} onChange={handlePledgeChange} className="w-full px-4 py-3 rounded-lg bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-700 focus:border-primary focus:ring-0">
+                            <option value="">Make a general donation</option>
+                            {pledges.map(p => (
+                                <option key={p.id} value={p.id}>
+                                    {p.fund} (Given Ksh {p.totalGiven.toLocaleString()} of {p.totalPledged.toLocaleString()})
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                )}
                 <div>
                     <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Amount (Ksh)</label>
                     <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Enter amount" required className="w-full px-4 py-3 rounded-lg bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-700 text-lg focus:border-primary focus:ring-0" />
                 </div>
                 <div>
                     <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Designate to Fund</label>
-                    <select value={fund} onChange={(e) => setFund(e.target.value)} className="w-full px-4 py-3 rounded-lg bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-700 focus:border-primary focus:ring-0">
+                    <select value={fund} onChange={(e) => setFund(e.target.value)} disabled={!!selectedPledgeId} className="w-full px-4 py-3 rounded-lg bg-slate-100 dark:bg-slate-800 border-2 border-slate-300 dark:border-slate-700 focus:border-primary focus:ring-0 disabled:bg-slate-200 dark:disabled:bg-slate-800/50">
                         <option>Tithes & Offering</option><option>Building Fund</option><option>Missions</option><option>Welfare</option>
                     </select>
                 </div>
@@ -1778,15 +1917,13 @@ function PaymentGateway({ details, onSuccess }) {
         setIsSubmitting(true);
         setError('');
         try {
-            // In a real app, this is where you would get a URL from your backend
-            // and redirect the user: window.location.href = '...';
-            // Here, we simulate the delay and the successful return from the payment page.
             await new Promise(resolve => setTimeout(resolve, 2000));
             
             const amount = parseFloat(details.amount);
-            const collectionName = details.givingType === 'one-time' ? 'donations' : 'recurring_donations';
-            
-            const docRef = await addDoc(collection(db, `artifacts/${appId}/public/data/${collectionName}`), { 
+            const batch = writeBatch(db);
+
+            const donationRef = doc(collection(db, `artifacts/${appId}/public/data/donations`));
+            const donationData = { 
                 userId: user.uid, 
                 memberName: userData.name, 
                 amount: amount, 
@@ -1794,15 +1931,28 @@ function PaymentGateway({ details, onSuccess }) {
                 paymentMethod: details.paymentMethod, 
                 type: 'Online', 
                 date: Timestamp.now(), 
-                status: details.givingType === 'recurring' ? 'active' : 'completed',
+                status: 'completed',
                 groupId: userData.groupId || null,
                 groupName: userData.groupName || null,
-            });
+                pledgeId: details.selectedPledgeId || null, 
+            };
+            batch.set(donationRef, donationData);
+
+            if (details.selectedPledgeId) {
+                const pledgeRef = doc(db, `artifacts/${appId}/public/data/pledges`, details.selectedPledgeId);
+                const pledgeDoc = await getDoc(pledgeRef);
+                if (pledgeDoc.exists()) {
+                    const currentGiven = pledgeDoc.data().totalGiven || 0;
+                    batch.update(pledgeRef, { totalGiven: currentGiven + amount });
+                }
+            }
+
+            await batch.commit();
             
             await logAuditEvent(userData, `Made online donation of Ksh ${amount}`);
             await createLedgerEntries([
-                { account: 'Cash', description: `Online donation from ${userData.name}`, type: 'debit', amount: amount, referenceId: docRef.id },
-                { account: `${details.fund} Income`, description: `Online donation from ${userData.name}`, type: 'credit', amount: amount, referenceId: docRef.id }
+                { account: 'Cash', description: `Online donation from ${userData.name}`, type: 'debit', amount: amount, referenceId: donationRef.id },
+                { account: `${details.fund} Income`, description: `Online donation from ${userData.name}`, type: 'credit', amount: amount, referenceId: donationRef.id }
             ]);
 
             onSuccess();
@@ -1828,7 +1978,6 @@ function PaymentGateway({ details, onSuccess }) {
                 </div>
             )}
 
-            {/* UPDATED: Hosted Payment Page Simulation for Card Payments */}
             {details.paymentMethod === 'Card' && (
                 <div className="text-left bg-slate-100 dark:bg-slate-800/50 p-4 rounded-lg">
                     <p className="font-semibold mb-2 text-slate-800 dark:text-slate-200">Secure Card Payment</p>
@@ -2410,23 +2559,123 @@ function EventsPage() {
 }
 
 function SmallGroupsPage() {
-    const groups = [{ id: 1, name: 'Men\'s Fellowship', leader: 'John K.', meetingTime: 'Saturdays, 8 AM' }, { id: 2, name: 'Young Professionals', leader: 'Sarah M.', meetingTime: 'Wednesdays, 7 PM' }];
+    const { db, appId, userData } = useContext(AppContext);
+    const [groups, setGroups] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [myGroup, setMyGroup] = useState(null);
+    const [myGroupMembers, setMyGroupMembers] = useState([]);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [groupContributions, setGroupContributions] = useState(0);
+
+    useEffect(() => {
+        const fetchGroups = async () => {
+            setLoading(true);
+            const groupsQuery = query(collection(db, `artifacts/${appId}/public/data/small_groups`), orderBy("name"));
+            const groupsSnapshot = await getDocs(groupsQuery);
+            setGroups(groupsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+            
+            if (userData.groupId) {
+                const groupDoc = await getDoc(doc(db, `artifacts/${appId}/public/data/small_groups`, userData.groupId));
+                if (groupDoc.exists()) {
+                    setMyGroup({ id: groupDoc.id, ...groupDoc.data() });
+                    const membersQuery = query(collection(db, "users"), where("groupId", "==", userData.groupId));
+                    const membersSnapshot = await getDocs(membersQuery);
+                    setMyGroupMembers(membersSnapshot.docs.map(d => d.data()));
+
+                    const donationsQuery = query(collection(db, `artifacts/${appId}/public/data/donations`), where("groupId", "==", userData.groupId));
+                    const donationsSnapshot = await getDocs(donationsQuery);
+                    const total = donationsSnapshot.docs.reduce((sum, doc) => sum + doc.data().amount, 0);
+                    setGroupContributions(total);
+                }
+            }
+            setLoading(false);
+        };
+        fetchGroups();
+    }, [db, appId, userData.groupId]);
+
+    const handleJoinGroup = async (group) => {
+        setIsSubmitting(true);
+        const userDocRef = doc(db, "users", userData.uid);
+        try {
+            await updateDoc(userDocRef, {
+                groupId: group.id,
+                groupName: group.name,
+                joinRequest: null // Clear any old requests
+            });
+        } catch (error) {
+            console.error("Failed to join group:", error);
+            alert("Error: Could not join the group. Please check your internet connection or contact an administrator.");
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    if (loading) return <LoadingScreen message="Loading Small Groups..." />;
+
+    if (userData.groupId && myGroup) {
+        const hasGoal = myGroup.goalAmount > 0;
+        const goalPercentage = hasGoal ? (groupContributions / myGroup.goalAmount) * 100 : 0;
+        return (
+            <div>
+                <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100">Your Small Group</h2>
+                <div className="mt-6 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-8 rounded-xl shadow-lg">
+                    <h3 className="text-2xl font-bold text-primary">{myGroup.name}</h3>
+                    <p className="text-slate-600 dark:text-slate-400 mt-1">Leader: {myGroup.leaderName || 'N/A'}</p>
+                    <p className="mt-4 text-slate-700 dark:text-slate-300">{myGroup.description || 'No description provided.'}</p>
+                    
+                    {hasGoal && (
+                        <div className="mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
+                            <h4 className="font-bold text-lg text-slate-900 dark:text-slate-100">{myGroup.goalTitle}</h4>
+                            <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2.5 mt-2">
+                                <div className="bg-primary h-2.5 rounded-full" style={{ width: `${Math.min(goalPercentage, 100)}%` }}></div>
+                            </div>
+                            <div className="flex justify-between text-sm mt-1">
+                                <span className="font-bold text-primary">Ksh {groupContributions.toLocaleString()} raised</span>
+                                <span className="text-slate-500 dark:text-slate-400">Goal: {myGroup.goalAmount.toLocaleString()}</span>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="mt-8">
+                        <h4 className="font-bold text-lg text-slate-900 dark:text-slate-100">Members ({myGroupMembers.length})</h4>
+                        <ul className="divide-y divide-slate-200 dark:divide-slate-800 mt-2">
+                            {myGroupMembers.map(member => (
+                                <li key={member.uid} className="py-2 text-slate-600 dark:text-slate-400">{member.name}</li>
+                            ))}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+    
     return (
         <div>
             <h2 className="text-3xl font-bold mb-6 text-slate-900 dark:text-slate-100">Find a Small Group</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {groups.map(g => 
-                    <div key={g.id} className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg">
-                        <h3 className="font-bold text-xl text-slate-900 dark:text-slate-100">{g.name}</h3>
-                        <p className="text-slate-700 dark:text-slate-300">Leader: {g.leader}</p>
-                        <p className="text-slate-500 dark:text-slate-400">{g.meetingTime}</p>
-                        <button className="mt-4 bg-primary text-white px-4 py-2 rounded-lg hover:bg-indigo-500">Request to Join</button>
+                    <div key={g.id} className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg flex flex-col justify-between">
+                        <div>
+                            <h3 className="font-bold text-xl text-slate-900 dark:text-slate-100">{g.name}</h3>
+                            <p className="text-slate-700 dark:text-slate-300">Leader: {g.leaderName || 'N/A'}</p>
+                            <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">{g.description || 'No description provided.'}</p>
+                        </div>
+                        <button 
+                            onClick={() => handleJoinGroup(g)}
+                            disabled={isSubmitting}
+                            className="mt-4 w-full bg-primary text-white px-4 py-2 rounded-lg hover:bg-indigo-500 disabled:bg-slate-400 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
+                        >
+                           <Users2 size={16}/>
+                           <span>Join Group</span>
+                        </button>
                     </div>
                 )}
+                 {groups.length === 0 && <p className="text-center p-8 col-span-full">No small groups are available right now.</p>}
             </div>
         </div>
     );
 }
+
 
 // --- NEW ACCOUNTING MODULES ---
 function GeneralLedgerPage() {
@@ -2443,11 +2692,26 @@ function GeneralLedgerPage() {
         return () => unsubscribe();
     }, [db, appId]);
 
+    const totalDebits = ledger.reduce((acc, entry) => entry.type === 'debit' ? acc + entry.amount : acc, 0);
+    const totalCredits = ledger.reduce((acc, entry) => entry.type === 'credit' ? acc + entry.amount : acc, 0);
+
     if (loading) return <LoadingScreen message="Loading General Ledger..." />;
 
     return (
         <div>
             <h2 className="text-3xl font-bold mb-6 text-slate-900 dark:text-slate-100">General Ledger</h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                <div className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg">
+                    <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400">Total Debits</h3>
+                    <p className="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">Ksh {totalDebits.toLocaleString()}</p>
+                </div>
+                <div className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg">
+                    <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400">Total Credits</h3>
+                    <p className="text-3xl font-bold text-rose-600 dark:text-accent-rose mt-2">Ksh {totalCredits.toLocaleString()}</p>
+                </div>
+            </div>
+
             <div className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg overflow-x-auto">
                 <table className="w-full text-sm text-left text-slate-600 dark:text-slate-400">
                     <thead className="text-xs text-slate-700 dark:text-slate-300 uppercase bg-slate-100 dark:bg-slate-800/50">
@@ -2950,7 +3214,6 @@ function ManageSmallGroups() {
 
     const handleDelete = async (group) => {
         if (window.confirm(`Are you sure you want to delete the group "${group.name}"? This cannot be undone.`)) {
-            // Optional: Find users in this group and unassign them.
             const q = query(collection(db, "users"), where("groupId", "==", group.id));
             const usersSnapshot = await getDocs(q);
             const batch = writeBatch(db);
@@ -2987,23 +3250,47 @@ function ManageSmallGroups() {
                 <SmallGroupForm onSubmit={handleFormSubmit} onCancel={handleModalClose} group={editingGroup} />
             </Modal>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {groups.map(group => (
-                    <motion.div key={group.id} initial={{opacity: 0, y: 20}} animate={{opacity: 1, y: 0}} className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg flex flex-col">
-                        <div className="flex-grow">
-                            <h3 className="font-bold text-xl text-slate-900 dark:text-slate-100">{group.name}</h3>
-                            <p className="text-slate-500 dark:text-slate-400 text-sm">Leader: {group.leaderName || 'N/A'}</p>
-                            <div className="mt-4">
-                                <p className="text-sm text-slate-500 dark:text-slate-400">Total Contributions</p>
-                                <p className="text-2xl font-bold text-green-600 dark:text-green-400">Ksh {getGroupTotal(group.id).toLocaleString()}</p>
+                {groups.map(group => {
+                    const totalContributions = getGroupTotal(group.id);
+                    const hasGoal = group.goalAmount > 0;
+                    const goalPercentage = hasGoal ? (totalContributions / group.goalAmount) * 100 : 0;
+                    return (
+                        <motion.div key={group.id} initial={{opacity: 0, y: 20}} animate={{opacity: 1, y: 0}} className="bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-lg flex flex-col">
+                            <div className="flex-grow">
+                                <h3 className="font-bold text-xl text-slate-900 dark:text-slate-100">{group.name}</h3>
+                                <p className="text-slate-500 dark:text-slate-400 text-sm">Leader: {group.leaderName || 'N/A'}</p>
+                                <div className="mt-4">
+                                    {hasGoal ? (
+                                        <>
+                                            <p className="font-semibold text-slate-800 dark:text-slate-200">{group.goalTitle}</p>
+                                            <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2.5 mt-2">
+                                                <motion.div 
+                                                    className="bg-primary h-2.5 rounded-full" 
+                                                    initial={{ width: 0 }} 
+                                                    animate={{ width: `${Math.min(goalPercentage, 100)}%` }} 
+                                                />
+                                            </div>
+                                            <div className="flex justify-between text-sm mt-1">
+                                                <span className="font-bold text-primary">Ksh {totalContributions.toLocaleString()}</span>
+                                                <span className="text-slate-500 dark:text-slate-400">of {group.goalAmount.toLocaleString()}</span>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p className="text-sm text-slate-500 dark:text-slate-400">Total Contributions</p>
+                                            <p className="text-2xl font-bold text-green-600 dark:text-green-400">Ksh {totalContributions.toLocaleString()}</p>
+                                        </>
+                                    )}
+                                </div>
                             </div>
-                        </div>
-                        <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800 flex justify-end space-x-2">
-                            <button onClick={() => { setEditingGroup(group); setIsModalOpen(true); }} className="p-2 text-slate-500 dark:text-slate-400 hover:text-primary"><Edit size={18}/></button>
-                            <button onClick={() => handleDelete(group)} className="p-2 text-slate-500 dark:text-slate-400 hover:text-accent-rose"><Trash2 size={18}/></button>
-                            <button onClick={() => handleViewDetails(group)} className="px-3 py-1.5 text-sm bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-md hover:bg-slate-300 dark:hover:bg-slate-600">View Details</button>
-                        </div>
-                    </motion.div>
-                ))}
+                            <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800 flex justify-end space-x-2">
+                                <button onClick={() => { setEditingGroup(group); setIsModalOpen(true); }} className="p-2 text-slate-500 dark:text-slate-400 hover:text-primary"><Edit size={18}/></button>
+                                <button onClick={() => handleDelete(group)} className="p-2 text-slate-500 dark:text-slate-400 hover:text-accent-rose"><Trash2 size={18}/></button>
+                                <button onClick={() => handleViewDetails(group)} className="px-3 py-1.5 text-sm bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-md hover:bg-slate-300 dark:hover:bg-slate-600">View Details</button>
+                            </div>
+                        </motion.div>
+                    )
+                })}
                 {groups.length === 0 && <p className="text-center p-8 col-span-full">No small groups created yet.</p>}
             </div>
         </div>
@@ -3011,13 +3298,29 @@ function ManageSmallGroups() {
 }
 
 function SmallGroupForm({ onSubmit, onCancel, group }) {
-    const [formData, setFormData] = useState({ name: '', leaderName: '', description: '' });
+    const [formData, setFormData] = useState({ name: '', leaderName: '', description: '', goalTitle: '', goalAmount: '' });
+    
     useEffect(() => {
-        if (group) setFormData({ name: group.name, leaderName: group.leaderName, description: group.description });
+        if (group) {
+            setFormData({ 
+                name: group.name || '', 
+                leaderName: group.leaderName || '', 
+                description: group.description || '',
+                goalTitle: group.goalTitle || '',
+                goalAmount: group.goalAmount || ''
+            });
+        }
     }, [group]);
 
     const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
-    const handleSubmit = (e) => { e.preventDefault(); onSubmit(formData); };
+    
+    const handleSubmit = (e) => { 
+        e.preventDefault(); 
+        onSubmit({
+            ...formData,
+            goalAmount: parseFloat(formData.goalAmount) || 0
+        }); 
+    };
     
     const FormInput = ({label, ...props}) => (
         <div>
@@ -3036,7 +3339,14 @@ function SmallGroupForm({ onSubmit, onCancel, group }) {
         <form onSubmit={handleSubmit} className="space-y-4">
             <FormInput label="Group Name" type="text" name="name" value={formData.name} onChange={handleChange} required />
             <FormInput label="Leader's Name" type="text" name="leaderName" value={formData.leaderName} onChange={handleChange} />
-            <FormTextarea label="Description" name="description" rows="3" value={formData.description} onChange={handleChange} />
+            <FormTextarea label="Description" name="description" rows="3" value={formData.description || ''} onChange={handleChange} />
+            
+            <div className="pt-4 border-t border-slate-200 dark:border-slate-700">
+                <h4 className="text-lg font-semibold text-slate-800 dark:text-slate-200 mb-2">Group Goal (Optional)</h4>
+                <FormInput label="Goal Title" type="text" name="goalTitle" placeholder="e.g., Youth Camp Fundraiser" value={formData.goalTitle} onChange={handleChange} />
+                <FormInput label="Goal Amount (Ksh)" type="number" name="goalAmount" placeholder="e.g., 50000" value={formData.goalAmount} onChange={handleChange} />
+            </div>
+
             <div className="flex justify-end space-x-4 pt-4">
                 <button type="button" onClick={onCancel} className="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-700">Cancel</button>
                 <button type="submit" className="px-4 py-2 rounded-lg text-white bg-primary">{group ? 'Save Changes' : 'Create Group'}</button>
