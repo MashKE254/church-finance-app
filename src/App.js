@@ -470,7 +470,7 @@ function Sidebar({ currentPage, setCurrentPage, role, sidebarOpen, setSidebarOpe
                 }
             </AnimatePresence>
             <motion.div 
-                className={`fixed inset-y-0 left-0 w-64 bg-white/70 dark:bg-slate-900/70 backdrop-blur-lg border-r border-slate-200 dark:border-slate-800 shadow-2xl transform lg:relative lg:translate-x-0 transition-transform duration-300 ease-in-out z-30 flex flex-col`} 
+                className={`fixed inset-y-0 left-0 w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 shadow-2xl transform lg:relative lg:translate-x-0 transition-transform duration-300 ease-in-out z-30 flex flex-col`} 
                 initial={{ x: '-100%' }} 
                 animate={{ x: sidebarOpen || window.innerWidth >= 1024 ? '0%' : '-100%' }}
             >
@@ -516,6 +516,7 @@ function Sidebar({ currentPage, setCurrentPage, role, sidebarOpen, setSidebarOpe
         </>
     );
 }
+
 
 function ThemeToggler() {
     const { theme, toggleTheme } = useContext(AppContext);
